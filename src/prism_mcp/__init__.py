@@ -83,7 +83,12 @@ class ToolDefinition:
     """
 
     name: str
-    description: str | None = None
+    #: Never ``None``. A tool with no description is still callable -- the model
+    #: just gets less to go on -- and a missing one is coerced to ``""`` rather
+    #: than kept as ``None`` so the DIGEST matches the reference's. That value is
+    #: a pin's material, and a pin an operator computes against a PHP deployment
+    #: has to validate here. See G-20.
+    description: str = ""
     input_schema: dict[str, Any] = field(default_factory=dict)
     title: str | None = None
     annotations: dict[str, Any] = field(default_factory=dict)
@@ -95,11 +100,14 @@ class ToolDefinition:
         if not isinstance(name, str) or not name:
             raise McpError(ErrorCode.PROTOCOL_FAILURE, "A tool in the server's list has no name.")
 
+        description = payload.get("description")
+
         return cls(
             name=name,
-            description=payload.get("description")
-            if isinstance(payload.get("description"), str)
-            else None,
+            # Absent becomes "", not None. Refusing a terse server would be
+            # worse, and keeping None made this port's digest disagree with
+            # every pin computed against the reference.
+            description=description if isinstance(description, str) else "",
             input_schema=_as_dict(payload.get("inputSchema")),
             title=payload.get("title") if isinstance(payload.get("title"), str) else None,
             annotations=_as_dict(payload.get("annotations")),
