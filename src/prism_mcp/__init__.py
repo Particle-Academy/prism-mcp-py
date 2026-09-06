@@ -11,6 +11,8 @@ from enum import Enum
 from typing import Any
 
 __all__ = [
+    "KNOWN_PROTOCOL_VERSIONS",
+    "LATEST_PROTOCOL_VERSION",
     "PROTOCOL_VERSIONS",
     "Client",
     "ErrorCode",
@@ -23,6 +25,7 @@ __all__ = [
     "TrustPolicy",
     "allow_all",
     "deny_all",
+    "is_stateless_protocol",
 ]
 
 
@@ -63,8 +66,42 @@ def _as_list(value: Any) -> list[Any]:
     return value if isinstance(value, list) else []
 
 
-#: The protocol revisions this client speaks.
+#: Every MCP revision this client KNOWS ABOUT, newest first.
+#:
+#: Only ``2026-07-28`` is spoken. The older entries exist so a server
+#: announcing one can be refused BY NAME rather than by "unsupported version" --
+#: an error naming both sides is actionable, one naming neither is a support
+#: ticket. Mirrors ``Prism\Mcp\Enums\ProtocolVersion`` in the reference.
+#:
+#: The split matters more than it looks. ``2026-07-28`` removed ``initialize``
+#: outright and made the protocol stateless: every request carries its own
+#: protocol version, capabilities and client info in ``_meta``. Everything from
+#: ``2025-11-25`` back does the opposite -- a stateful handshake, then a
+#: session. They are two protocols wearing one name, which is why speaking both
+#: is a whole second implementation rather than a compatibility branch.
+KNOWN_PROTOCOL_VERSIONS = (
+    "2026-07-28",
+    "2025-11-25",
+    "2025-06-18",
+    "2025-03-26",
+    "2024-11-05",
+)
+
+#: The revisions this client will actually talk.
 PROTOCOL_VERSIONS = ("2026-07-28",)
+
+#: The newest revision this client speaks.
+LATEST_PROTOCOL_VERSION = "2026-07-28"
+
+
+def is_stateless_protocol(version: str) -> bool:
+    """Whether a revision uses per-request ``_meta`` rather than a handshake.
+
+    ``2026-07-28`` and later are stateless. Everything earlier opens with
+    ``initialize`` and then carries a session, which this client does not model
+    at all -- so a False here means "different protocol", not "older one".
+    """
+    return version == LATEST_PROTOCOL_VERSION
 
 
 # -- tool definitions --------------------------------------------------------
@@ -483,7 +520,6 @@ class Client:
         trust: TrustPolicy | None = None,
         guard: ResultGuard | None = None,
         gate: ToolGate | None = None,
-        protocol_version: str = PROTOCOL_VERSIONS[0],
     ) -> None:
         self._server = server
         self._transport = transport
@@ -491,28 +527,24 @@ class Client:
         self._trust = trust if trust is not None else TrustPolicy.undeclared()
         self._guard = guard if guard is not None else ResultGuard()
         self._gate = gate if gate is not None else allow_all
-        self._protocol_version = protocol_version
 
-    def initialize(self) -> str:
-        reply = self._transport(
-            TransportRequest("initialize", {"protocolVersion": self._protocol_version})
-        )
-
-        if not isinstance(reply, dict):
-            raise McpError(
-                ErrorCode.PROTOCOL_FAILURE, "The server did not answer initialize with an object."
-            )
-
-        version = reply.get("protocolVersion")
-
-        if not isinstance(version, str) or version not in PROTOCOL_VERSIONS:
-            raise McpError(
-                ErrorCode.UNSUPPORTED_PROTOCOL_VERSION,
-                f"The server [{self._server}] speaks protocol [{version}], which this client "
-                "does not.",
-            )
-
-        return version
+    # There is deliberately no ``initialize()`` here.
+    #
+    # ``2026-07-28`` REMOVED the handshake -- the protocol is stateless, and
+    # every request carries its own version and client info. The PHP reference
+    # has no such method for that reason, and its transport contract says
+    # reproducing the session-based shape "would be carrying scaffolding for a
+    # protocol this client does not speak".
+    #
+    # This port had one anyway, and it made failures read backwards: a caller
+    # invoked a handshake that exists only here, offered a version the wire
+    # protocol has no handshake to agree on, and got an error blaming a version
+    # mismatch -- when the real answer is that the two sides are different
+    # protocols. Reported from the outside as prism-mcp-py#1, tracked as G-52.
+    #
+    # Removed rather than widened. Accepting ``2024-11-05`` here would have let
+    # the handshake succeed and then failed further in, on a session-based shape
+    # nothing else in this package models -- a claim of support that is not one.
 
     def list_tools(self) -> list[ToolDefinition]:
         """The tools this client will offer, after trust and the annotation rules.

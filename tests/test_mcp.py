@@ -7,6 +7,9 @@ from typing import Any
 import pytest
 
 from prism_mcp import (
+    KNOWN_PROTOCOL_VERSIONS,
+    LATEST_PROTOCOL_VERSION,
+    PROTOCOL_VERSIONS,
     Client,
     McpError,
     MirroredParameters,
@@ -15,6 +18,7 @@ from prism_mcp import (
     TransportRequest,
     TrustPolicy,
     deny_all,
+    is_stateless_protocol,
 )
 
 
@@ -251,13 +255,37 @@ def test_bounds_how_deep_it_will_walk() -> None:
 # -- the client --------------------------------------------------------------
 
 
-def test_refuses_a_protocol_version_it_does_not_speak() -> None:
-    send, _ = transport({"initialize": {"protocolVersion": "1999-01-01"}})
+def test_knows_the_revisions_it_does_not_speak_by_name() -> None:
+    # There is no handshake to test any more. `2026-07-28` REMOVED `initialize`
+    # and made the protocol stateless, the PHP reference has no such method, and
+    # this port carried one anyway -- which made failures read backwards
+    # (prism-mcp-py#1, G-52).
+    #
+    # What replaces it is the ability to name a revision rather than to
+    # negotiate one. The older entries exist so a server announcing one can be
+    # refused BY NAME: an error naming both sides is actionable, one naming
+    # neither is a support ticket.
+    assert LATEST_PROTOCOL_VERSION == "2026-07-28"
+    assert PROTOCOL_VERSIONS == ("2026-07-28",)
 
-    with pytest.raises(McpError) as caught:
-        Client("docs", send).initialize()
+    # Every revision in the wild, and none of them spoken. They are a stateful
+    # handshake then a session -- a different protocol wearing the same name,
+    # not an older one.
+    for legacy in ("2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"):
+        assert legacy in KNOWN_PROTOCOL_VERSIONS
+        assert legacy not in PROTOCOL_VERSIONS
+        assert is_stateless_protocol(legacy) is False
 
-    assert caught.value.code == "unsupported_protocol_version"
+    assert is_stateless_protocol(LATEST_PROTOCOL_VERSION) is True
+
+
+def test_the_client_no_longer_offers_a_handshake() -> None:
+    # The guard against it coming back. A host that calls initialize() should
+    # get an AttributeError naming the method, not a version negotiation for a
+    # protocol that has none.
+    send, _ = transport({})
+
+    assert not hasattr(Client("docs", send), "initialize")
 
 
 def test_is_undeclared_by_default_so_listing_refuses() -> None:
