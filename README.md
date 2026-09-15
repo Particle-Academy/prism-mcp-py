@@ -88,6 +88,10 @@ prism-parity's `mcp-tool-digest` corpus pins tool digests against the PHP
 reference and the TypeScript port, so a pin computed in one language holds in
 the others.
 
+One case is not in that corpus: a schema containing an integral float such as
+`1.0` digests differently here than in PHP and TypeScript. For such a tool,
+compute the pin in Python.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
