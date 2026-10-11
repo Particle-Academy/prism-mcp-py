@@ -19,15 +19,23 @@ docs = Client(
     trust=TrustPolicy.allowing(["search"], pins={"search": "sha256:3f1c…"}),
 )
 
-tools = docs.list_tools()
-result = docs.call_tool(tools[0], {"query": "rate limits"})
 
-print(result.text)
+async def search_docs() -> None:
+    tools = await docs.list_tools()
+    result = await docs.call_tool(tools[0], {"query": "rate limits"})
+
+    print(result.text)
 ```
 
-`my_transport` is a callable that sends a `TransportRequest` (`method`, `params`,
-`headers`) to the server and returns the decoded result. The package opens no
-connections itself.
+`my_transport` is a callable that takes a `TransportRequest` (`method`, `params`,
+`headers`) and returns an awaitable yielding the decoded server result. An
+`async def` transport satisfies that contract. The package opens no connections
+itself.
+
+**Breaking change in 0.2.0:** `list_tools()` and `call_tool()` must be awaited,
+and the transport must return an awaitable. Run `search_docs()` in your
+application's event loop. A synchronous embedder must manage that loop itself;
+the package provides one async client path.
 
 ## Trust
 

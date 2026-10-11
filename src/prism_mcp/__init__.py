@@ -7,7 +7,7 @@ import html
 import json as _json
 import re
 import secrets
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -527,8 +527,11 @@ class TransportRequest:
     headers: dict[str, str] = field(default_factory=dict)
 
 
-#: How this package reaches a server. An interface, so it has no dependencies.
-Transport = Callable[[TransportRequest], Any]
+#: How this package reaches a server: the caller supplies an awaitable result.
+#: The transport owns the I/O, so this package need not choose an HTTP library
+#: or carry a dependency. A synchronous runner here would also choose an event
+#: loop for the embedder, which is the embedder's decision. G-83.
+Transport = Callable[[TransportRequest], Awaitable[Any]]
 
 
 @dataclass(frozen=True)
@@ -571,14 +574,14 @@ class Client:
     # the handshake succeed and then failed further in, on a session-based shape
     # nothing else in this package models -- a claim of support that is not one.
 
-    def list_tools(self) -> list[ToolDefinition]:
-        """The tools this client will offer, after trust and the annotation rules.
+    async def list_tools(self) -> list[ToolDefinition]:
+        """Await discovery, then offer tools after trust and the annotation rules.
 
         A tool whose mirrored-parameter annotations break the spec is EXCLUDED
         rather than fixed up, because the spec says so and because the
         alternative is guessing what the server meant by an illegal header name.
         """
-        reply = self._transport(TransportRequest("tools/list"))
+        reply = await self._transport(TransportRequest("tools/list"))
 
         if not isinstance(reply, dict) or not isinstance(reply.get("tools"), list):
             raise McpError(
@@ -604,7 +607,9 @@ class Client:
 
         return offered
 
-    def call_tool(self, tool: ToolDefinition, args: dict[str, Any] | None = None) -> ToolResult:
+    async def call_tool(
+        self, tool: ToolDefinition, args: dict[str, Any] | None = None
+    ) -> ToolResult:
         arguments = dict(args or {})
 
         if not self._gate(self._server, tool.name, arguments):
@@ -615,7 +620,7 @@ class Client:
 
         mirrored = MirroredParameters.from_schema(tool.name, tool.input_schema)
 
-        reply = self._transport(
+        reply = await self._transport(
             TransportRequest(
                 "tools/call",
                 {"name": tool.name, "arguments": arguments},
