@@ -246,6 +246,17 @@ def test_refuses_an_illegal_header_name() -> None:
         )
 
 
+@pytest.mark.parametrize("bad", [{"type": "string"}, "", 42, True, None, ["Region"]])
+def test_refuses_an_annotation_that_is_not_a_string_as_the_reference_does(bad: object) -> None:
+    # The reference (PHP MirroredParameters::annotation) refuses `! is_string($name)`. This port used to SKIP
+    # a non-string annotation, so a server built on it could publish a schema a spec client drops: Claude Code
+    # excluded every tool written `'x-mcp-header': {type: 'string'}` (genie2, 2026-10-13).
+    with pytest.raises(McpError, match="not a legal HTTP header name|must be a header name"):
+        MirroredParameters.from_schema(
+            "t", {"properties": {"x": {"type": "string", "x-mcp-header": bad}}}
+        )
+
+
 def test_refuses_a_type_the_spec_does_not_allow_including_number() -> None:
     # `number` is deliberately absent from the allowed list.
     with pytest.raises(McpError, match="must be one of"):

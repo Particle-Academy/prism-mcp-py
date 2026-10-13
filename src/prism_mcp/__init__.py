@@ -479,6 +479,17 @@ def _walk_schema(
 
         annotation = raw.get(MIRROR_ANNOTATION)
 
+        # PRESENT is what decides, as in the reference (`! is_string($name)` refuses): an annotation that is
+        # not a string is a broken one, never an absent one. Skipping it let a server publish a schema a spec
+        # client drops -- Claude Code excluded every tool written {"x-mcp-header": {"type": "string"}}.
+        if MIRROR_ANNOTATION in raw and not isinstance(annotation, str):
+            where = ".".join([*path, key])
+            raise McpError(
+                ErrorCode.MIRRORED_PARAMETER_REFUSED,
+                f"The tool [{tool}] is excluded: the [{MIRROR_ANNOTATION}] value on [{where}] must be a "
+                f"header name (a string), not {type(annotation).__name__}.",
+            )
+
         if isinstance(annotation, str):
             kind = raw.get("type")
 
