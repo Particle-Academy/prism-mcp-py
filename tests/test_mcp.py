@@ -163,6 +163,19 @@ def test_refuses_an_oversized_result_rather_than_truncating() -> None:
         ResultGuard(max_bytes=32).guard("docs", "search", "x" * 100)
 
 
+def test_refuses_a_filter_that_does_not_return_text() -> None:
+    # The filter is sync. An `async def` one returns a coroutine, and framing
+    # that would hand the model "<coroutine object ...>" as the tool's answer
+    # with nothing but a RuntimeWarning to say so. Same shape as G-83.
+    async def redact(_server: str, _tool: str, text: str) -> str:
+        return text
+
+    guard = ResultGuard(filter=redact)  # type: ignore[arg-type]
+
+    with pytest.raises(TypeError, match="must return str"):
+        guard.guard("docs", "search", "the answer")
+
+
 def test_frames_the_result_as_data_with_its_provenance() -> None:
     # A mitigation, not a fix: a determined injection can still work. What it
     # buys is that the model has the information needed to distrust it.
@@ -416,6 +429,57 @@ class TestClient(IsolatedAsyncioTestCase):
 
         assert caught.value.code == "tool_denied"
         assert sent == []
+
+    async def test_lets_an_async_gate_refuse_a_call(self) -> None:
+        # G-83. An `async def` gate returns a coroutine, which is truthy, so an
+        # unawaited verdict is read as consent and the call is SENT. 0.2.0
+        # shipped exactly that, because every gate test passed a plain def.
+        async def refuse(_server: str, _tool: str, _args: dict[str, Any]) -> bool:
+            await asyncio.sleep(0)
+            return False
+
+        send, sent = transport({"tools/call": {"content": []}})
+        client = Client("docs", send, trust=TrustPolicy.allowing_every_tool(), gate=refuse)
+
+        with pytest.raises(McpError) as caught:
+            await client.call_tool(ToolDefinition.from_payload(SEARCH_TOOL))
+
+        assert caught.value.code == "tool_denied"
+        assert sent == []
+
+    async def test_refuses_a_gate_whose_verdict_is_still_awaitable(self) -> None:
+        # An async gate that delegates and forgets the inner await resolves to
+        # ANOTHER coroutine, which is truthy. Awaiting once would read that as
+        # consent: the G-83 bypass one level down.
+        async def check(_server: str, _tool: str, _args: dict[str, Any]) -> bool:
+            return False
+
+        async def gate(server: str, tool: str, args: dict[str, Any]) -> bool:
+            return check(server, tool, args)  # type: ignore[return-value]
+
+        send, sent = transport({"tools/call": {"content": []}})
+        client = Client("docs", send, trust=TrustPolicy.allowing_every_tool(), gate=gate)
+
+        with pytest.raises(TypeError, match="gate must resolve to a verdict"):
+            await client.call_tool(ToolDefinition.from_payload(SEARCH_TOOL))
+
+        assert sent == []
+
+    async def test_honours_an_async_gate_that_allows(self) -> None:
+        seen: list[tuple[str, str, dict[str, Any]]] = []
+
+        async def allow(server: str, tool: str, args: dict[str, Any]) -> bool:
+            seen.append((server, tool, args))
+            return True
+
+        send, sent = transport({"tools/call": {"content": [{"text": "ok"}]}})
+        client = Client("docs", send, trust=TrustPolicy.allowing_every_tool(), gate=allow)
+
+        result = await client.call_tool(ToolDefinition.from_payload(SEARCH_TOOL), {"query": "x"})
+
+        assert seen == [("docs", "search", {"query": "x"})]
+        assert len(sent) == 1
+        assert "ok" in result.text
 
     async def test_names_a_malformed_reply_rather_than_reading_past_it(self) -> None:
         send, _ = transport({"tools/list": {"nope": True}})

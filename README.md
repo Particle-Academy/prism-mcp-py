@@ -37,6 +37,10 @@ and the transport must return an awaitable. Run `search_docs()` in your
 application's event loop. A synchronous embedder must manage that loop itself;
 the package provides one async client path.
 
+**Security fix in 0.2.1:** in 0.2.0 an `async def` gate was never awaited. Its
+coroutine is truthy, so a gate that returned `False` was read as consent and the
+call was sent. If you wrote an async gate, upgrade.
+
 ## Trust
 
 A tool list is not data the model summarises; it is instructions the model
@@ -53,7 +57,8 @@ follows. So nothing is offered until you say what you trust.
   description after you trusted it is refused with `tool_definition_changed`.
 
 A `gate` callable `(server, tool, arguments) -> bool` is asked before every
-call; returning `False` raises `tool_denied`. The default allows every call that
+call; returning `False` raises `tool_denied`. It may be sync or `async def`; an
+async verdict is awaited before anything is sent. The default allows every call that
 trust admitted, and `deny_all` refuses them all.
 
 ## Results
@@ -65,7 +70,8 @@ Every result passes through a `ResultGuard` before it reaches you:
 - The text is wrapped in an `<untrusted-tool-output>` tag with a random id per
   result, so the server's output cannot close the wrapper.
 - A `filter` callable `(server, tool, text) -> text` runs before framing, if you
-  pass one.
+  pass one. It must be synchronous; one that returns anything but `str` (an
+  `async def` filter returns a coroutine) raises `TypeError`.
 
 The wrapper makes a prompt injection harder. It does not make one impossible,
 and the guard does not scan the text for injection strings.

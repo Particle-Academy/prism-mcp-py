@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import html
+import inspect
 import json as _json
 import re
 import secrets
@@ -337,6 +338,17 @@ class ResultGuard:
 
         filtered = self._filter(server, tool, text) if self._filter is not None else text
 
+        # The filter is sync. An `async def` one returns a coroutine, and framing
+        # it would hand the model "<coroutine object ...>" as the answer. Refused
+        # loudly, for the reason the gate's verdict is awaited (G-83).
+        if not isinstance(filtered, str):
+            if inspect.iscoroutine(filtered):
+                filtered.close()
+            raise TypeError(
+                f"The ResultGuard filter must return str, got {type(filtered).__name__}. "
+                "An async filter is not supported; redact synchronously."
+            )
+
         if not self._frame_provenance:
             return filtered
 
@@ -517,7 +529,11 @@ def _walk_schema(
 # -- the gate ----------------------------------------------------------------
 
 #: Whether a call may proceed at all. Separate from trust, which is discovery.
-ToolGate = Callable[[str, str, dict[str, Any]], bool]
+#:
+#: Sync or async. An ``async def`` gate is the natural thing to write against an
+#: async client, and its verdict is awaited before anything is sent. 0.2.0 did not
+#: await it: the coroutine is truthy, so a refusal was read as consent (G-83).
+ToolGate = Callable[[str, str, dict[str, Any]], bool | Awaitable[bool]]
 
 
 def allow_all(_server: str, _tool: str, _args: dict[str, Any]) -> bool:
@@ -623,7 +639,20 @@ class Client:
     ) -> ToolResult:
         arguments = dict(args or {})
 
-        if not self._gate(self._server, tool.name, arguments):
+        verdict = self._gate(self._server, tool.name, arguments)
+        # Mirrors the server's gate: awaited before anything is sent.
+        if inspect.isawaitable(verdict):
+            verdict = await verdict
+        # A gate that delegates and forgets an inner await resolves to another
+        # awaitable, which is truthy. Refused rather than read as consent.
+        if inspect.isawaitable(verdict):
+            if inspect.iscoroutine(verdict):
+                verdict.close()
+            raise TypeError(
+                f"The gate must resolve to a verdict, got {type(verdict).__name__}. "
+                "Await any coroutine inside the gate before returning."
+            )
+        if not verdict:
             raise McpError(
                 ErrorCode.TOOL_DENIED,
                 f"The gate refused the call to [{tool.name}] on server [{self._server}].",
