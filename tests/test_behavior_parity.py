@@ -163,9 +163,15 @@ def test_diagnostic_failure_propagates_without_offering_tools(kind: str) -> None
         TrustPolicy.allowing(["configured_missing"]),
         failing if kind == "sync" else async_failing,
     )
-    with pytest.raises(type(failure)) as caught:
-        asyncio.run(client.list_tools())
-    assert caught.value is failure
+
+    async def check_failure() -> None:
+        # Python 3.10's Task boundary can replace CancelledError. Check identity
+        # at the SDK await boundary, before asyncio.run applies native behavior.
+        with pytest.raises(type(failure)) as caught:
+            await client.list_tools()
+        assert caught.value is failure
+
+    asyncio.run(check_failure())
 
 
 def test_wildcard_has_no_missing_configured_name_diagnostic() -> None:

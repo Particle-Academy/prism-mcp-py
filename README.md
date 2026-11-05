@@ -65,8 +65,10 @@ async def report_missing(event: McpDiagnostic) -> None:
     # Frozen event: code, configured server and configured tool_names tuple.
     await report_missing_tools(event)
 
-docs = Client("docs", my_transport, trust=TrustPolicy.allowing(["search"]),
-              on_diagnostic=report_missing)
+
+docs = Client(
+    "docs", my_transport, trust=TrustPolicy.allowing(["search"]), on_diagnostic=report_missing
+)
 ```
 
 Import `McpDiagnostic` from `prism_mcp` for the type annotation. The callback
