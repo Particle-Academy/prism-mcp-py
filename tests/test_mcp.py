@@ -73,7 +73,8 @@ def test_declared_empty_is_different_from_undeclared() -> None:
     declared_empty = TrustPolicy.allowing([])
 
     assert declared_empty.is_declared() is True
-    assert declared_empty.admit("docs", [ToolDefinition.from_payload(SEARCH_TOOL)]) == []
+    with pytest.raises(McpError, match="empty tool allowlist"):
+        declared_empty.admit("docs", [ToolDefinition.from_payload(SEARCH_TOOL)])
 
 
 def test_admits_only_the_tools_that_were_named() -> None:
@@ -380,7 +381,7 @@ class TestClient(IsolatedAsyncioTestCase):
         assert [tool.name for tool in await client.list_tools()] == ["search"]
 
     async def test_sends_the_mirrored_header_on_a_call(self) -> None:
-        send, sent = transport({"tools/call": {"content": [{"text": "ok"}]}})
+        send, sent = transport({"tools/call": {"content": [{"type": "text", "text": "ok"}]}})
         client = Client("docs", send, trust=TrustPolicy.allowing_every_tool())
 
         tool = ToolDefinition(
@@ -396,7 +397,7 @@ class TestClient(IsolatedAsyncioTestCase):
         send, sent = transport(
             {
                 "tools/list": {"tools": [SEARCH_TOOL]},
-                "tools/call": {"content": [{"text": "the answer"}]},
+                "tools/call": {"content": [{"type": "text", "text": "the answer"}]},
             }
         )
         client = Client("docs", send, trust=TrustPolicy.allowing(["search"]))
@@ -412,7 +413,9 @@ class TestClient(IsolatedAsyncioTestCase):
     async def test_carries_is_error_without_raising(self) -> None:
         # The tool ran and reported failure. That is an answer, not a transport
         # problem, and the model is the right audience for it.
-        send, _ = transport({"tools/call": {"content": [{"text": "no such doc"}], "isError": True}})
+        send, _ = transport(
+            {"tools/call": {"content": [{"type": "text", "text": "no such doc"}], "isError": True}}
+        )
         client = Client("docs", send, trust=TrustPolicy.allowing_every_tool())
 
         result = await client.call_tool(ToolDefinition.from_payload(SEARCH_TOOL))
@@ -472,7 +475,7 @@ class TestClient(IsolatedAsyncioTestCase):
             seen.append((server, tool, args))
             return True
 
-        send, sent = transport({"tools/call": {"content": [{"text": "ok"}]}})
+        send, sent = transport({"tools/call": {"content": [{"type": "text", "text": "ok"}]}})
         client = Client("docs", send, trust=TrustPolicy.allowing_every_tool(), gate=allow)
 
         result = await client.call_tool(ToolDefinition.from_payload(SEARCH_TOOL), {"query": "x"})
