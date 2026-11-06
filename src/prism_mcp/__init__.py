@@ -8,10 +8,11 @@ import inspect
 import json as _json
 import re
 import secrets
+import warnings
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any
+from typing import Any, Literal, cast
 
 __all__ = [
     "KNOWN_PROTOCOL_VERSIONS",
@@ -19,6 +20,8 @@ __all__ = [
     "PROTOCOL_VERSIONS",
     "Client",
     "ErrorCode",
+    "McpDiagnostic",
+    "McpDiagnosticWarning",
     "McpError",
     "MirroredParameters",
     "ResultGuard",
@@ -232,13 +235,8 @@ class TrustPolicy:
     def is_declared(self) -> bool:
         return self._every_tool or self._allowed_tools is not None
 
-    def admit(self, server: str, tools: Sequence[ToolDefinition]) -> list[ToolDefinition]:
-        """Filter a server's tool list down to what was declared.
-
-        RAISES on an undeclared server rather than returning nothing: silently
-        returning an empty list would look identical to a server with no tools,
-        and the two need opposite responses from whoever reads it.
-        """
+    def assert_declared_for(self, server: str) -> None:
+        """Refuse misconfiguration before the client invokes its transport."""
         if not self.is_declared():
             raise McpError(
                 ErrorCode.SERVER_NOT_TRUSTED,
@@ -246,6 +244,33 @@ class TrustPolicy:
                 "offered. A tool list is not data a model summarises -- it is instructions the "
                 "model follows. Declare which tools you trust, or trust every tool explicitly.",
             )
+        if not self._every_tool and self._allowed_tools == []:
+            raise McpError(
+                ErrorCode.SERVER_NOT_TRUSTED,
+                f"The MCP server [{server}] has an empty tool allowlist. An empty allowlist and "
+                "no allowlist are different mistakes. Name the tools you trust, or trust every "
+                "tool explicitly.",
+            )
+
+    def names_explicitly(self, tool: str) -> bool:
+        return not self._every_tool and tool in (self._allowed_tools or [])
+
+    def named_but_not_offered(self, offered: Sequence[str]) -> list[str]:
+        names = set(offered)
+        return (
+            []
+            if self._every_tool
+            else [name for name in (self._allowed_tools or []) if name not in names]
+        )
+
+    def admit(self, server: str, tools: Sequence[ToolDefinition]) -> list[ToolDefinition]:
+        """Filter a server's tool list down to what was declared.
+
+        RAISES on an undeclared server rather than returning nothing: silently
+        returning an empty list would look identical to a server with no tools,
+        and the two need opposite responses from whoever reads it.
+        """
+        self.assert_declared_for(server)
 
         admitted = (
             list(tools)
@@ -312,7 +337,7 @@ class ResultGuard:
 
     def __init__(
         self,
-        max_bytes: int = 64 * 1024,
+        max_bytes: int = 262144,
         frame_provenance: bool = True,
         filter: Callable[[str, str, str], str] | None = None,
     ) -> None:
@@ -567,6 +592,24 @@ class ToolResult:
     is_error: bool = False
 
 
+@dataclass(frozen=True)
+class McpDiagnostic:
+    """Configured identifiers only; server response strings never enter this channel."""
+
+    server: str
+    tool_names: tuple[str, ...]
+    code: Literal["trusted_tools_not_offered"] = "trusted_tools_not_offered"
+
+
+class McpDiagnosticWarning(UserWarning):
+    def __init__(self, diagnostic: McpDiagnostic) -> None:
+        self.diagnostic = diagnostic
+        super().__init__(
+            f"The MCP server [{diagnostic.server}] does not offer these trusted tools: "
+            f"{', '.join(diagnostic.tool_names)}."
+        )
+
+
 class Client:
     def __init__(
         self,
@@ -575,6 +618,7 @@ class Client:
         trust: TrustPolicy | None = None,
         guard: ResultGuard | None = None,
         gate: ToolGate | None = None,
+        on_diagnostic: Callable[[McpDiagnostic], None | Awaitable[None]] | None = None,
     ) -> None:
         self._server = server
         self._transport = transport
@@ -582,6 +626,10 @@ class Client:
         self._trust = trust if trust is not None else TrustPolicy.undeclared()
         self._guard = guard if guard is not None else ResultGuard()
         self._gate = gate if gate is not None else allow_all
+        if on_diagnostic is not None and not callable(on_diagnostic):
+            raise TypeError("on_diagnostic must be callable.")
+        self._on_diagnostic = on_diagnostic
+        self._excluded: dict[str, str] = {}
 
     # There is deliberately no ``initialize()`` here.
     #
@@ -608,6 +656,8 @@ class Client:
         rather than fixed up, because the spec says so and because the
         alternative is guessing what the server meant by an illegal header name.
         """
+        self._trust.assert_declared_for(self._server)
+        self._excluded.clear()
         reply = await self._transport(TransportRequest("tools/list"))
 
         if not isinstance(reply, dict) or not isinstance(reply.get("tools"), list):
@@ -622,17 +672,44 @@ class Client:
 
         offered: list[ToolDefinition] = []
 
-        for tool in self._trust.admit(self._server, declared):
+        for tool in declared:
             try:
                 MirroredParameters.from_schema(tool.name, tool.input_schema)
             except McpError as error:
                 if error.code == ErrorCode.MIRRORED_PARAMETER_REFUSED.value:
+                    self._excluded[tool.name] = str(error)
+                    if self._trust.names_explicitly(tool.name):
+                        raise McpError(
+                            ErrorCode.MIRRORED_PARAMETER_REFUSED,
+                            f"The explicitly trusted tool [{tool.name}] on server [{self._server}] "
+                            "has invalid mirrored-parameter annotations and was excluded.",
+                        ) from None
                     continue
                 raise
 
             offered.append(tool)
 
-        return offered
+        missing = self._trust.named_but_not_offered([tool.name for tool in offered])
+        if missing:
+            diagnostic = McpDiagnostic(self._server, tuple(missing))
+            if self._on_diagnostic is None:
+                warnings.warn(McpDiagnosticWarning(diagnostic), stacklevel=2)
+            else:
+                callback_result: object = self._on_diagnostic(diagnostic)
+                if inspect.isawaitable(callback_result):
+                    callback_result = await cast(Awaitable[object], callback_result)
+                if inspect.isawaitable(callback_result):
+                    if inspect.iscoroutine(callback_result):
+                        callback_result.close()
+                    raise TypeError(
+                        "on_diagnostic must await its inner coroutine before returning."
+                    )
+
+        return self._trust.admit(self._server, offered)
+
+    def excluded(self) -> dict[str, str]:
+        """A detached snapshot; changing it cannot alter the client's exclusion state."""
+        return dict(self._excluded)
 
     async def call_tool(
         self, tool: ToolDefinition, args: dict[str, Any] | None = None
@@ -675,12 +752,15 @@ class Client:
 
         content = _as_list(reply.get("content"))
         text = "\n".join(
-            part.get("text", "")
+            part["text"]
+            if part.get("type") == "text" and isinstance(part.get("text"), str)
+            else f"[{part['type'] if isinstance(part.get('type'), str) else 'unknown'} "
+            "content omitted: this release passes text through only]"
             for part in content
-            if isinstance(part, dict) and isinstance(part.get("text"), str)
+            if isinstance(part, dict)
         )
 
         return ToolResult(
             text=self._guard.guard(self._server, tool.name, text),
-            is_error=reply.get("isError") is True,
+            is_error="isError" in reply and reply["isError"] is not False,
         )
